@@ -3,7 +3,6 @@ class PromptInjector {
   constructor() {
     this.isEnabled = true;
     this.selectedText = "";
-    this.db = null;
     this.dbManager = null;
     this.chromeExtensionContext = typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage;
     this.init();
@@ -26,53 +25,17 @@ class PromptInjector {
   }
 
   async initDB() {
-    return new Promise((resolve, reject) => {
-      const request = indexedDB.open('PromptHiveDB', 3);
-      
-      request.onerror = () => {
-        console.error('Database failed to open:', request.error);
-        reject(request.error);
-      };
-      
-      request.onsuccess = () => {
-        this.db = request.result;
-        console.log('Database opened successfully in injector');
-        resolve();
-      };
-      
-      request.onupgradeneeded = (event) => {
-        const db = event.target.result;
-        console.log('Database upgrade needed in injector...');
-        
-        // Create prompts store if it doesn't exist
-        if (!db.objectStoreNames.contains('prompts')) {
-          const promptStore = db.createObjectStore('prompts', { keyPath: 'id' });
-          promptStore.createIndex('title', 'title', { unique: false });
-          promptStore.createIndex('tags', 'tags', { unique: false, multiEntry: true });
-          promptStore.createIndex('createdAt', 'createdAt', { unique: false });
-          promptStore.createIndex('updatedAt', 'updatedAt', { unique: false });
-          promptStore.createIndex('uses', 'uses', { unique: false });
-          promptStore.createIndex('version', 'version', { unique: false });
-          promptStore.createIndex('category', 'category', { unique: false });
-        }
-        
-        // Create prompt history store if it doesn't exist
-        if (!db.objectStoreNames.contains('promptHistory')) {
-          const historyStore = db.createObjectStore('promptHistory', { keyPath: 'historyId' });
-          historyStore.createIndex('promptId', 'promptId', { unique: false });
-          historyStore.createIndex('version', 'version', { unique: false });
-          historyStore.createIndex('createdAt', 'createdAt', { unique: false });
-        }
-
-        // Create analytics store if it doesn't exist
-        if (!db.objectStoreNames.contains('analytics')) {
-          const analyticsStore = db.createObjectStore('analytics', { keyPath: 'id', autoIncrement: true });
-          analyticsStore.createIndex('promptId', 'promptId', { unique: false });
-          analyticsStore.createIndex('action', 'action', { unique: false });
-          analyticsStore.createIndex('timestamp', 'timestamp', { unique: false });
-        }
-      };
-    });
+    try {
+      if (typeof PromptHiveDatabase !== 'undefined') {
+        this.dbManager = new PromptHiveDatabase();
+        await this.dbManager.init();
+        console.log('Database manager initialized successfully in injector');
+      } else {
+        console.warn('PromptHiveDatabase class not available in injector context');
+      }
+    } catch (error) {
+      console.error('Failed to initialize database manager in injector:', error);
+    }
   }
 
   addSelectionListener() {
@@ -322,63 +285,32 @@ class PromptInjector {
   }
 
   async savePromptToDB(prompt) {
-    if (!this.db) {
-      console.warn('Database not initialized, cannot save to IndexedDB');
+    if (!this.dbManager) {
+      console.warn('Database manager not available, cannot save to IndexedDB');
       return false;
     }
 
-    return new Promise((resolve, reject) => {
-      try {
-        const transaction = this.db.transaction(['prompts'], 'readwrite');
-        const store = transaction.objectStore('prompts');
-        const request = store.put(prompt);
-        
-        request.onsuccess = () => {
-          console.log('Prompt saved to IndexedDB:', prompt.id);
-          resolve(true);
-        };
-        
-        request.onerror = () => {
-          console.error('Error saving prompt to IndexedDB:', request.error);
-          resolve(false); // Changed from reject to resolve(false) for better flow control
-        };
-
-        transaction.onerror = () => {
-          console.error('Transaction error:', transaction.error);
-          resolve(false); // Changed from reject to resolve(false) for better flow control
-        };
-
-        transaction.onabort = () => {
-          console.error('Transaction aborted');
-          resolve(false);
-        };
-      } catch (error) {
-        console.error('Exception in savePromptToDB:', error);
-        resolve(false); // Changed from reject to resolve(false) for better flow control
-      }
-    });
+    try {
+      const result = await this.dbManager.createPrompt(prompt);
+      console.log('Prompt saved to IndexedDB:', prompt.id);
+      return result;
+    } catch (error) {
+      console.error('Error saving prompt to IndexedDB:', error);
+      return false;
+    }
   }
 
   async logAnalytics(promptId, action, metadata = {}) {
-    if (!this.db) {
-      console.warn('Database not initialized, skipping analytics');
+    if (!this.dbManager) {
+      console.warn('Database manager not available, skipping analytics');
       return;
     }
 
     try {
-      const transaction = this.db.transaction(['analytics'], 'readwrite');
-      const store = transaction.objectStore('analytics');
-      
-      const analyticsEntry = {
-        promptId,
-        action,
-        metadata,
-        timestamp: new Date().toISOString(),
-        userAgent: navigator.userAgent,
+      await this.dbManager.logAnalytics(promptId, action, {
+        ...metadata,
         url: window.location.href
-      };
-      
-      store.add(analyticsEntry);
+      });
       console.log('Analytics logged:', action);
     } catch (error) {
       console.warn('Failed to log analytics:', error);

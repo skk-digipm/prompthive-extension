@@ -529,6 +529,48 @@ class PromptHiveDatabase {
     const store = transaction.objectStore(storeName);
     return await this.getAllFromStore(store);
   }
+
+  // Get a single history entry by ID
+  async getHistoryEntry(historyId) {
+    const transaction = this.db.transaction(['promptHistory'], 'readonly');
+    const store = transaction.objectStore('promptHistory');
+    return await this.getFromStore(store, historyId);
+  }
+
+  // Get prompt history for a specific prompt
+  async getPromptHistory(promptId) {
+    const transaction = this.db.transaction(['promptHistory'], 'readonly');
+    const store = transaction.objectStore('promptHistory');
+    const index = store.index('promptId');
+    
+    return new Promise((resolve, reject) => {
+      const request = index.getAll(promptId);
+      request.onsuccess = () => {
+        const history = request.result.sort((a, b) => b.version - a.version);
+        resolve(history);
+      };
+      request.onerror = () => reject(request.error);
+    });
+  }
+
+  // Save prompt history
+  async savePromptHistory(promptId, oldPrompt, version) {
+    const historyEntry = {
+      historyId: `${promptId}_v${version}_${Date.now()}`,
+      promptId: promptId,
+      version: version,
+      title: oldPrompt.title,
+      text: oldPrompt.text,
+      tags: oldPrompt.tags,
+      createdAt: new Date().toISOString(),
+      originalDate: oldPrompt.date,
+      originalUses: oldPrompt.uses
+    };
+
+    const transaction = this.db.transaction(['promptHistory'], 'readwrite');
+    const store = transaction.objectStore('promptHistory');
+    return await this.addToStore(store, historyEntry);
+  }
 }
 
 // Export for use in background script
