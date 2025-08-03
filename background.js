@@ -1,10 +1,4 @@
 // Enhanced Background script for PromptHive with improved database integration
-// Import database module
-try {
-  importScripts('database.js');
-} catch (error) {
-  console.error('Failed to import database.js:', error);
-}
 
 class PromptHiveBackground {
   constructor() {
@@ -598,30 +592,13 @@ class PromptHiveBackground {
   }
 }
 
-// Initialize background script when service worker starts
-let promptHiveBackground = null;
-
-// Import database script
-async function initializeBackground() {
-  try {
-    // Import the database class
-    if (typeof importScripts !== 'undefined') {
-      importScripts('database.js');
-    }
-    
-    // Create global instance
-    promptHiveBackground = new PromptHiveBackground();
-  } catch (error) {
-    console.error('Failed to initialize background script:', error);
-  }
-}
-
-// Initialize when service worker starts
-if (typeof importScripts !== 'undefined') {
-  initializeBackground();
-} else {
-  // For testing environment
-  if (typeof module !== 'undefined' && module.exports) {
-    module.exports = PromptHiveBackground;
-  }
+// Import database script and initialize background script
+try {
+  // Import the database class
+  importScripts('database.js');
+  
+  // Initialize background script when service worker starts
+  const promptHiveBackground = new PromptHiveBackground();
+} catch (error) {
+  console.error('Failed to initialize background script:', error);
 }
