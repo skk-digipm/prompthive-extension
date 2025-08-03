@@ -1,4 +1,4 @@
-// Enhanced Database Manager for PromptHive
+// Enhanced Database Manager for PromptHive.
 class PromptHiveDatabase {
   constructor() {
     this.db = null;
