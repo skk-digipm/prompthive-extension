@@ -5,6 +5,7 @@ class PromptInjector {
     this.selectedText = "";
     this.db = null;
     this.dbManager = null;
+    this.chromeExtensionContext = typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage;
     this.init();
   }
 
@@ -98,6 +99,12 @@ class PromptInjector {
   }
 
   addFloatingButton() {
+    // Remove existing button if it exists
+    const existingButton = document.getElementById("prompthive-floating-btn");
+    if (existingButton) {
+      existingButton.remove();
+    }
+
     const button = document.createElement("div");
     button.id = "prompthive-floating-btn";
     button.innerHTML = `
@@ -107,13 +114,15 @@ class PromptInjector {
       </div>
     `;
     button.style.display = "none";
-    document.body.appendChild(button);
-
+    
+    // FIXED: Use addEventListener instead of inline onclick
     button.addEventListener("click", (e) => {
       e.preventDefault();
       e.stopPropagation();
       this.saveSelectedText();
     });
+
+    document.body.appendChild(button);
   }
 
   showFloatingButton(x, y) {
@@ -133,6 +142,8 @@ class PromptInjector {
   }
 
   async saveSelectedText() {
+    console.log('saveSelectedText called with:', this.selectedText.substring(0, 50) + '...');
+    
     if (!this.selectedText || this.selectedText.trim().length < 5) {
       this.showErrorNotification('Selected text is too short to save');
       return;
@@ -155,24 +166,40 @@ class PromptInjector {
       updatedAt: new Date().toISOString()
     };
 
+    console.log('Attempting to save prompt:', prompt.id);
+
     try {
-      // Save to IndexedDB first
-      const saved = await this.savePromptToDB(prompt);
-      if (saved) {
+      // PRIMARY: Save to IndexedDB first (most reliable)
+      const dbSaved = await this.savePromptToDB(prompt);
+      console.log('IndexedDB save result:', dbSaved);
+      
+      if (dbSaved) {
         console.log('Prompt saved to IndexedDB successfully:', prompt.id);
         
-        // Also try to save via background script for redundancy
-        try {
-          const response = await chrome.runtime.sendMessage({
-            action: "savePrompt",
-            prompt: prompt
-          });
-          
-          if (response && response.success) {
-            console.log('Prompt also saved via background script');
+        // SECONDARY: Try background script (if extension context available)
+        if (this.chromeExtensionContext) {
+          try {
+            const response = await new Promise((resolve, reject) => {
+              chrome.runtime.sendMessage({
+                action: "savePrompt",
+                prompt: prompt
+              }, (response) => {
+                if (chrome.runtime.lastError) {
+                  reject(new Error(chrome.runtime.lastError.message));
+                } else {
+                  resolve(response);
+                }
+              });
+            });
+            
+            if (response && response.success) {
+              console.log('Prompt also saved via background script');
+            }
+          } catch (bgError) {
+            console.warn('Background script save failed, but IndexedDB save succeeded:', bgError);
           }
-        } catch (bgError) {
-          console.warn('Background script save failed, but IndexedDB save succeeded:', bgError);
+        } else {
+          console.log('Chrome extension context not available, skipping background save');
         }
 
         // Log analytics
@@ -183,34 +210,52 @@ class PromptInjector {
         });
 
         this.showSaveNotification('Prompt saved successfully!');
+        
+        // Clean up UI
+        this.hideFloatingButton();
+        window.getSelection().removeAllRanges();
+        
       } else {
         throw new Error('Failed to save to IndexedDB');
       }
     } catch (error) {
-      console.error('Failed to save prompt:', error);
+      console.error('Primary save method failed:', error);
       
-      // Fallback: try background script only
-      try {
-        const response = await chrome.runtime.sendMessage({
-          action: "savePrompt",
-          prompt: prompt
-        });
-        
-        if (response && response.success) {
-          console.log('Prompt saved via background script fallback');
-          this.showSaveNotification('Prompt saved successfully!');
-        } else {
-          throw new Error('Background script save also failed');
+      // FALLBACK: Try background script only if extension context is available
+      if (this.chromeExtensionContext) {
+        try {
+          const response = await new Promise((resolve, reject) => {
+            chrome.runtime.sendMessage({
+              action: "savePrompt",
+              prompt: prompt
+            }, (response) => {
+              if (chrome.runtime.lastError) {
+                reject(new Error(chrome.runtime.lastError.message));
+              } else {
+                resolve(response);
+              }
+            });
+          });
+          
+          if (response && response.success) {
+            console.log('Prompt saved via background script fallback');
+            this.showSaveNotification('Prompt saved successfully!');
+            // Clean up UI
+            this.hideFloatingButton();
+            window.getSelection().removeAllRanges();
+          } else {
+            throw new Error('Background script save failed: ' + (response ? response.error : 'No response'));
+          }
+        } catch (fallbackError) {
+          console.error('Fallback save method also failed:', fallbackError);
+          this.showErrorNotification('Failed to save prompt. Please try the extension popup.');
         }
-      } catch (fallbackError) {
-        console.error('All save methods failed:', fallbackError);
-        this.showErrorNotification('Failed to save prompt. Please try again.');
+      } else {
+        // No extension context available
+        console.error('No extension context and IndexedDB failed. Cannot save.');
+        this.showErrorNotification('Failed to save prompt. Please try refreshing the page.');
       }
     }
-
-    // Clean up UI
-    this.hideFloatingButton();
-    window.getSelection().removeAllRanges();
   }
 
   generateTitle(pageTitle, text) {
@@ -295,16 +340,21 @@ class PromptInjector {
         
         request.onerror = () => {
           console.error('Error saving prompt to IndexedDB:', request.error);
-          reject(request.error);
+          resolve(false); // Changed from reject to resolve(false) for better flow control
         };
 
         transaction.onerror = () => {
           console.error('Transaction error:', transaction.error);
-          reject(transaction.error);
+          resolve(false); // Changed from reject to resolve(false) for better flow control
+        };
+
+        transaction.onabort = () => {
+          console.error('Transaction aborted');
+          resolve(false);
         };
       } catch (error) {
         console.error('Exception in savePromptToDB:', error);
-        reject(error);
+        resolve(false); // Changed from reject to resolve(false) for better flow control
       }
     });
   }
@@ -475,6 +525,7 @@ class PromptInjector {
       const messageContent = message.querySelector(".prose, .markdown, [class*=\"markdown\"]") || message;
       
       if (messageContent && messageContent.textContent.trim().length > 50) {
+        // FIXED: Use addEventListener instead of inline event handler
         saveBtn.addEventListener("click", (e) => {
           e.stopPropagation();
           this.saveMessageContent(messageContent.textContent, "ChatGPT Response");
@@ -497,6 +548,7 @@ class PromptInjector {
       const messageContent = message.querySelector(".prose, .markdown, [class*=\"markdown\"]") || message;
       
       if (messageContent && messageContent.textContent.trim().length > 50) {
+        // FIXED: Use addEventListener instead of inline event handler
         saveBtn.addEventListener("click", (e) => {
           e.stopPropagation();
           this.saveMessageContent(messageContent.textContent, "Claude Response");
@@ -518,6 +570,7 @@ class PromptInjector {
       const saveBtn = this.createInlineSaveButton();
       
       if (message.textContent.trim().length > 50) {
+        // FIXED: Use addEventListener instead of inline event handler
         saveBtn.addEventListener("click", (e) => {
           e.stopPropagation();
           this.saveMessageContent(message.textContent, "Gemini Response");
@@ -539,6 +592,7 @@ class PromptInjector {
       const saveBtn = this.createInlineSaveButton();
       
       if (message.textContent.trim().length > 50) {
+        // FIXED: Use addEventListener instead of inline event handler
         saveBtn.addEventListener("click", (e) => {
           e.stopPropagation();
           this.saveMessageContent(message.textContent, "Perplexity Response");
@@ -589,18 +643,28 @@ class PromptInjector {
       if (saved) {
         console.log('AI response saved to IndexedDB successfully:', prompt.id);
         
-        // Also try to save via background script
-        try {
-          const response = await chrome.runtime.sendMessage({
-            action: "savePrompt",
-            prompt: prompt
-          });
-          
-          if (response && response.success) {
-            console.log('AI response also saved via background script');
+        // Also try to save via background script if extension context available
+        if (this.chromeExtensionContext) {
+          try {
+            const response = await new Promise((resolve, reject) => {
+              chrome.runtime.sendMessage({
+                action: "savePrompt",
+                prompt: prompt
+              }, (response) => {
+                if (chrome.runtime.lastError) {
+                  reject(new Error(chrome.runtime.lastError.message));
+                } else {
+                  resolve(response);
+                }
+              });
+            });
+            
+            if (response && response.success) {
+              console.log('AI response also saved via background script');
+            }
+          } catch (bgError) {
+            console.warn('Background script save failed for AI response, but IndexedDB save succeeded:', bgError);
           }
-        } catch (bgError) {
-          console.warn('Background script save failed for AI response, but IndexedDB save succeeded:', bgError);
         }
 
         // Log analytics
@@ -611,33 +675,50 @@ class PromptInjector {
         });
 
         this.showSaveNotification('AI response saved successfully!');
+        
       } else {
         throw new Error('Failed to save AI response to IndexedDB');
       }
     } catch (error) {
       console.error('Failed to save AI response:', error);
       
-      // Fallback: try background script only
-      try {
-        const response = await chrome.runtime.sendMessage({
-          action: "savePrompt",
-          prompt: prompt
-        });
-        
-        if (response && response.success) {
-          console.log('AI response saved via background script fallback');
-          this.showSaveNotification('AI response saved successfully!');
-        } else {
-          throw new Error('Background script save also failed');
+      // Fallback: try background script only if extension context available
+      if (this.chromeExtensionContext) {
+        try {
+          const response = await new Promise((resolve, reject) => {
+            chrome.runtime.sendMessage({
+              action: "savePrompt",
+              prompt: prompt
+            }, (response) => {
+              if (chrome.runtime.lastError) {
+                reject(new Error(chrome.runtime.lastError.message));
+              } else {
+                resolve(response);
+              }
+            });
+          });
+          
+          if (response && response.success) {
+            console.log('AI response saved via background script fallback');
+            this.showSaveNotification('AI response saved successfully!');
+          } else {
+            throw new Error('Background script save also failed');
+          }
+        } catch (fallbackError) {
+          console.error('All save methods failed for AI response:', fallbackError);
+          this.showErrorNotification('Failed to save AI response. Please try the extension popup.');
         }
-      } catch (fallbackError) {
-        console.error('All save methods failed for AI response:', fallbackError);
-        this.showErrorNotification('Failed to save AI response. Please try again.');
+      } else {
+        this.showErrorNotification('Failed to save AI response. Please try refreshing the page.');
       }
     }
   }
 
   showSaveNotification(message = 'Saved to PromptHive!') {
+    // Remove any existing notifications first
+    const existingNotifications = document.querySelectorAll('.prompthive-notification');
+    existingNotifications.forEach(notif => notif.remove());
+
     // Create and show a temporary notification
     const notification = document.createElement("div");
     notification.className = "prompthive-notification";
@@ -667,6 +748,10 @@ class PromptInjector {
   }
 
   showErrorNotification(message = 'Failed to save prompt!') {
+    // Remove any existing notifications first
+    const existingNotifications = document.querySelectorAll('.prompthive-notification');
+    existingNotifications.forEach(notif => notif.remove());
+
     // Create and show an error notification
     const notification = document.createElement("div");
     notification.className = "prompthive-notification error";
@@ -676,9 +761,6 @@ class PromptInjector {
         <span>${message}</span>
       </div>
     `;
-
-    // Add error styling
-    notification.style.background = "linear-gradient(135deg, #ef4444, #dc2626)";
 
     document.body.appendChild(notification);
 
