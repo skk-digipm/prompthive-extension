@@ -1,4 +1,11 @@
 // Enhanced Background script for PromptHive with improved database integration
+// Import database module
+try {
+  importScripts('database.js');
+} catch (error) {
+  console.error('Failed to import database.js:', error);
+}
+
 class PromptHiveBackground {
   constructor() {
     this.db = null;
