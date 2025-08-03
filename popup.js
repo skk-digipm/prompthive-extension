@@ -1,4 +1,4 @@
-// PromptHive Enhanced Popup Script with Dashboard and Improved UI
+// PromptHive Enhanced Popup Script with FIXED save functionality
 class PromptHive {
   constructor() {
     this.prompts = [];
@@ -219,16 +219,34 @@ class PromptHive {
 
   async savePromptToDB(prompt) {
     if (!this.db) {
-      throw new Error('Database not initialized');
+      console.warn('Database not initialized, skipping DB save');
+      return false;
     }
 
     return new Promise((resolve, reject) => {
-      const transaction = this.db.transaction(['prompts'], 'readwrite');
-      const store = transaction.objectStore('prompts');
-      const request = store.put(prompt);
-      
-      request.onsuccess = () => resolve();
-      request.onerror = () => reject(request.error);
+      try {
+        const transaction = this.db.transaction(['prompts'], 'readwrite');
+        const store = transaction.objectStore('prompts');
+        const request = store.put(prompt);
+        
+        request.onsuccess = () => {
+          console.log('Prompt saved successfully to DB:', prompt.id);
+          resolve(true);
+        };
+        
+        request.onerror = () => {
+          console.error('Error saving prompt to DB:', request.error);
+          reject(request.error);
+        };
+
+        transaction.onerror = () => {
+          console.error('Transaction error:', transaction.error);
+          reject(transaction.error);
+        };
+      } catch (error) {
+        console.error('Exception in savePromptToDB:', error);
+        reject(error);
+      }
     });
   }
 
@@ -356,13 +374,29 @@ class PromptHive {
         });
       }
 
-      // Modal events
+      // Modal events - FIXED: Remove existing listeners first
       const savePromptBtn = document.getElementById("savePromptBtn");
       if (savePromptBtn) {
-        savePromptBtn.addEventListener("click", (e) => {
+        // Remove any existing listeners
+        const newSaveBtn = savePromptBtn.cloneNode(true);
+        savePromptBtn.parentNode.replaceChild(newSaveBtn, savePromptBtn);
+        
+        // Add fresh listener
+        newSaveBtn.addEventListener("click", async (e) => {
           e.preventDefault();
           e.stopPropagation();
-          this.savePrompt();
+          
+          // Disable button to prevent double-clicks
+          newSaveBtn.disabled = true;
+          newSaveBtn.textContent = 'Saving...';
+          
+          try {
+            await this.savePrompt();
+          } finally {
+            // Re-enable button
+            newSaveBtn.disabled = false;
+            newSaveBtn.textContent = 'Save';
+          }
         });
       }
 
@@ -493,6 +527,15 @@ class PromptHive {
       if ((e.ctrlKey || e.metaKey) && e.key === "d") {
         e.preventDefault();
         this.openDashboard();
+      }
+
+      // Enter to save when modal is open
+      if (e.key === "Enter" && e.ctrlKey) {
+        const modalOverlay = document.getElementById("modalOverlay");
+        if (modalOverlay && modalOverlay.style.display === "flex") {
+          e.preventDefault();
+          this.savePrompt();
+        }
       }
     });
   }
@@ -1036,29 +1079,59 @@ class PromptHive {
   closeModal() {
     document.getElementById("modalOverlay").style.display = "none";
     this.editingIndex = null;
+    
+    // Clear form
+    document.getElementById("promptTitle").value = "";
+    document.getElementById("promptText").value = "";
+    document.getElementById("promptTags").value = "";
   }
 
+  // FIXED: Improved savePrompt method with better error handling and validation
   async savePrompt() {
-    const title = document.getElementById("promptTitle").value.trim();
-    const text = document.getElementById("promptText").value.trim();
-    const tagsInput = document.getElementById("promptTags").value.trim();
+    console.log('SavePrompt called'); // Debug log
     
-    if (!text) {
-      this.showNotification("Prompt content is required", "error");
-      document.getElementById("promptText").focus();
+    const titleInput = document.getElementById("promptTitle");
+    const textInput = document.getElementById("promptText");
+    const tagsInput = document.getElementById("promptTags");
+    
+    if (!titleInput || !textInput || !tagsInput) {
+      console.error('Required form elements not found');
+      this.showNotification("Form elements not found", "error");
       return;
     }
 
-    const tags = tagsInput ? 
-      tagsInput.split(",").map(tag => tag.trim()).filter(tag => tag) : [];
+    const title = titleInput.value.trim();
+    const text = textInput.value.trim();
+    const tagsInputValue = tagsInput.value.trim();
+    
+    // Validation
+    if (!text) {
+      this.showNotification("Prompt content is required", "error");
+      textInput.focus();
+      return;
+    }
+
+    if (text.length < 5) {
+      this.showNotification("Prompt content must be at least 5 characters", "error");
+      textInput.focus();
+      return;
+    }
+
+    const tags = tagsInputValue ? 
+      tagsInputValue.split(",").map(tag => tag.trim()).filter(tag => tag) : [];
 
     try {
       if (this.editingIndex !== null) {
+        console.log('Editing existing prompt at index:', this.editingIndex);
+        
         // Editing existing prompt - save current version to history first
         const currentPrompt = this.prompts[this.editingIndex];
         const currentVersion = currentPrompt.version || 1;
         
-        await this.savePromptHistory(currentPrompt.id, currentPrompt, currentVersion);
+        // Save to history before updating
+        if (this.db) {
+          await this.savePromptHistory(currentPrompt.id, currentPrompt, currentVersion);
+        }
         
         const updatedPrompt = {
           ...currentPrompt,
@@ -1069,14 +1142,22 @@ class PromptHive {
           updatedAt: new Date().toISOString()
         };
         
+        // Update in memory array
         this.prompts[this.editingIndex] = updatedPrompt;
         
+        // Save to database
         if (this.db) {
-          await this.savePromptToDB(updatedPrompt);
+          const saved = await this.savePromptToDB(updatedPrompt);
+          if (!saved) {
+            throw new Error('Failed to save to database');
+          }
         }
         
+        console.log('Prompt updated successfully');
         this.showNotification("Prompt updated successfully");
       } else {
+        console.log('Creating new prompt');
+        
         // Creating new prompt
         const newPrompt = {
           id: Date.now().toString() + Math.random().toString(36).substr(2, 9),
@@ -1086,27 +1167,81 @@ class PromptHive {
           date: new Date().toLocaleDateString(),
           uses: 0,
           version: 1,
-          category: 'general',
+          category: this.detectCategory(text, tags),
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString()
         };
         
+        // Save to database first
         if (this.db) {
-          await this.savePromptToDB(newPrompt);
+          const saved = await this.savePromptToDB(newPrompt);
+          if (!saved) {
+            throw new Error('Failed to save to database');
+          }
         }
+        
+        // Add to memory array (at beginning for newest first)
         this.prompts.unshift(newPrompt);
         
+        console.log('New prompt created successfully:', newPrompt.id);
         this.showNotification("Prompt added successfully");
       }
 
+      // Update UI and stats
       this.search(document.getElementById("searchInput").value);
       this.calculateStats();
       this.updateStats();
+      
+      // Close modal
       this.closeModal();
+      
     } catch (error) {
       console.error("Failed to save prompt:", error);
-      this.showNotification("Failed to save prompt", "error");
+      this.showNotification("Failed to save prompt. Please try again.", "error");
     }
+  }
+
+  // Helper method to detect category based on content
+  detectCategory(text, tags = []) {
+    const textLower = text.toLowerCase();
+    const allTags = tags.map(tag => tag.toLowerCase());
+    
+    // Check tags first
+    if (allTags.includes('coding') || allTags.includes('programming') || allTags.includes('code')) {
+      return 'coding';
+    }
+    if (allTags.includes('writing') || allTags.includes('content')) {
+      return 'writing';
+    }
+    if (allTags.includes('analysis') || allTags.includes('data')) {
+      return 'analysis';
+    }
+    if (allTags.includes('creative') || allTags.includes('design')) {
+      return 'creative';
+    }
+    
+    // Check content keywords
+    if (textLower.includes('code') || textLower.includes('function') || textLower.includes('javascript') || 
+        textLower.includes('python') || textLower.includes('programming') || textLower.includes('api')) {
+      return 'coding';
+    }
+    
+    if (textLower.includes('write') || textLower.includes('article') || textLower.includes('blog') || 
+        textLower.includes('content') || textLower.includes('copywriting')) {
+      return 'writing';
+    }
+    
+    if (textLower.includes('analyze') || textLower.includes('research') || textLower.includes('data') || 
+        textLower.includes('study') || textLower.includes('statistics')) {
+      return 'analysis';
+    }
+    
+    if (textLower.includes('creative') || textLower.includes('design') || textLower.includes('art') || 
+        textLower.includes('brainstorm') || textLower.includes('innovative')) {
+      return 'creative';
+    }
+    
+    return 'general';
   }
 
   exportToCSV() {
@@ -1159,7 +1294,10 @@ class PromptHive {
 
   showNotification(message, type = "success") {
     const notification = document.getElementById("notification");
-    if (!notification) return;
+    if (!notification) {
+      console.warn('Notification element not found');
+      return;
+    }
 
     notification.textContent = message;
     notification.style.display = "block";
